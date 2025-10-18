@@ -24,6 +24,12 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         break;
       }
 
+      case "COLLECTIONS_CREATE" : {
+        console.log(`🔴 Collections create added in ${shop}`);
+        console.log("Collections create added Payload:", payload);
+        break;
+      }
+
       default:
         console.log(`⚪ Unhandled webhook topic: ${topic}`);
         break;

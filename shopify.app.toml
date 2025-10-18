@@ -25,7 +25,8 @@ api_version = "2025-10"
   topics = [ 
     "products/create",
     "products/update",
-    "products/delete" 
+    "products/delete",
+    "collections/create"
   ]
   uri = "/webhooks/products/create"
 
