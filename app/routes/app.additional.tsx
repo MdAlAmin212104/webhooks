@@ -1,68 +1,47 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { authenticate } from "app/shopify.server";
 import { FormEvent, useState } from "react";
-import { ActionFunctionArgs, useSubmit } from "react-router";
+import { ActionFunctionArgs, useLoaderData, useSubmit } from "react-router";
+import db from "../db.server";
+import { Product } from "@shopify/app-bridge-react";
 
-interface Product {
-  id: string;
-  title: string;
-  handle: string;
-  image?: string;
-  variantId?: string;
-}
+
+
+export const loader = async ({ request }: ActionFunctionArgs) => {
+  const { session } = await authenticate.admin(request);
+  const shop = session.shop;
+
+  const notes = await db.productNote.findMany({
+    where: { shop },
+    orderBy: { createdAt: "desc" },
+  });
+
+  return (notes);
+};
+
 
 // ---------------- BACKEND ----------------
 export const action = async ({ request }: ActionFunctionArgs) => {
-  const { admin } = await authenticate.admin(request);
+  const { session } = await authenticate.admin(request);
+  const shop = session.shop;
 
   const { products, note } = await request.json();
-  console.log("🛍️ Selected Products:", products);
-  console.log("📝 Note:", note);
 
-  // প্রতিটি product এর জন্য metafield তৈরি
-  for (const productId of products) {
-    try {
-      await admin.graphql(
-        `#graphql
-        mutation CreateProductMetafield($productId: ID!, $note: String!) {
-          metafieldsSet(
-            metafields: [
-              {
-                ownerId: $productId
-                namespace: "custom"
-                key: "extra_note"
-                type: "single_line_text_field"
-                value: $note
-              }
-            ]
-          ) {
-            metafields {
-              id
-              key
-              value
-            }
-            userErrors {
-              field
-              message
-            }
-          }
-        }
-      `,
-        {
-          variables: {
-            productId,
-            note,
-          },
-        }
-      );
-
-      console.log(`✅ Metafield added for product: ${productId}`);
-    } catch (error) {
-      console.error(`❌ Failed to add metafield for product ${productId}`, error);
-    }
+  if (!products?.length || !note) {
+    return { status: 400 };
   }
 
-  return Response.json({ success: true, message: "Metafields added successfully!" });
+  for (const productId of products) {
+    await db.productNote.create({
+      data: {
+        shop,
+        productId,
+        note,
+      },
+    });
+  }
+
+  return ( { success: true });
 };
 
 
@@ -71,6 +50,10 @@ export default function AdditionalPage() {
   const [selectedProducts, setSelectedProducts] = useState<Product[]>([]);
   const [note, setNote] = useState("");
   const submit = useSubmit();
+  const data = useLoaderData()
+  console.log(data, "this is date for my database");
+
+
 
   // ✅ Product Picker Function
   async function selectProduct() {
@@ -145,10 +128,13 @@ export default function AdditionalPage() {
               placeholder="Add a note about these products..."
               value={note}
               onInput={(e: any) => setNote(e.target.value)}
-              rows="4"
+              rows={4}
             />
           </s-clickable>
         </form>
+      </s-section>
+      <s-section>
+        display product list using for datebase.
       </s-section>
     </s-page>
   );
