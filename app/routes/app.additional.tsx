@@ -1,14 +1,12 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { authenticate } from "app/shopify.server";
 import { FormEvent, useState } from "react";
-import { ActionFunctionArgs, useLoaderData, useSubmit } from "react-router";
+import { ActionFunctionArgs, useLoaderData } from "react-router";
 import db from "../db.server";
-import { Product } from "@shopify/app-bridge-react";
 
-
-
+// ---------------- BACKEND ----------------
 export const loader = async ({ request }: ActionFunctionArgs) => {
-  const { session } = await authenticate.admin(request);
+  const { admin, session } = await authenticate.admin(request);
   const shop = session.shop;
 
   const notes = await db.productNote.findMany({
@@ -16,47 +14,81 @@ export const loader = async ({ request }: ActionFunctionArgs) => {
     orderBy: { createdAt: "desc" },
   });
 
-  return (notes);
+  const productsWithData = await Promise.all(
+    notes.map(async (note) => {
+      try {
+        const response = await admin.graphql(`
+          query {
+            product(id: "${note.productId}") {
+              id
+              title
+              featuredImage {
+                originalSrc
+              }
+            }
+          }
+        `);
+
+        const result = await response.json();
+        const product = result.data?.product;
+
+        return {
+          ...note,
+          title: product?.title || "Unknown Product",
+          image: product?.featuredImage?.originalSrc || "",
+        };
+      } catch {
+        return { ...note, title: "Error loading product", image: "" };
+      }
+    })
+  );
+
+  return productsWithData;
 };
 
-
-// ---------------- BACKEND ----------------
+// ---------------- ACTION (Add / Update / Delete) ----------------
 export const action = async ({ request }: ActionFunctionArgs) => {
   const { session } = await authenticate.admin(request);
   const shop = session.shop;
+  const { actionType, noteId, products, note } = await request.json();
 
-  const { products, note } = await request.json();
+  switch (actionType) {
+    case "delete":
+      await db.productNote.delete({ where: { id: noteId } });
+      return { success: true, message: "Note deleted" };
 
-  if (!products?.length || !note) {
-    return { status: 400 };
+    case "update":
+      await db.productNote.update({
+        where: { id: noteId },
+        data: { note },
+      });
+      return { success: true, message: "Note updated" };
+
+    case "add":
+      if (!products?.length || !note?.trim()) return { status: 400 };
+      await Promise.all(
+        products.map((productId: string) =>
+          db.productNote.create({
+            data: { shop, productId, note },
+          })
+        )
+      );
+      return { success: true, message: "Note added" };
+
+    default:
+      return { success: false, message: "Invalid action" };
   }
-
-  for (const productId of products) {
-    await db.productNote.create({
-      data: {
-        shop,
-        productId,
-        note,
-      },
-    });
-  }
-
-  return ( { success: true });
 };
-
 
 // ---------------- FRONTEND ----------------
 export default function AdditionalPage() {
-  const [selectedProducts, setSelectedProducts] = useState<Product[]>([]);
+  const data = useLoaderData<typeof loader>();
+  const [selectedProducts, setSelectedProducts] = useState<any[]>([]);
   const [note, setNote] = useState("");
-  const submit = useSubmit();
-  const data = useLoaderData()
-  console.log(data, "this is date for my database");
+  const [editingNote, setEditingNote] = useState<any | null>(null);
 
-
-
-  // ✅ Product Picker Function
-  async function selectProduct() {
+  // ✅ Product Picker
+  const selectProduct = async () => {
     try {
       const products = await (window as any).shopify.resourcePicker({
         type: "product",
@@ -64,78 +96,182 @@ export default function AdditionalPage() {
         multiple: true,
       });
 
-      if (!products || products.length === 0) return;
+      if (!products?.length) return;
 
-      const formattedProducts: Product[] = products.map((p: any) => ({
-        id: p.id,
-        title: p.title,
-        handle: p.handle,
-        image: p.images?.[0]?.originalSrc || "",
-        variantId: p.variants?.[0]?.id,
-      }));
-
-      setSelectedProducts(formattedProducts);
+      setSelectedProducts(
+        products.map((p: any) => ({
+          id: p.id,
+          title: p.title,
+          image: p.images?.[0]?.originalSrc || "",
+        }))
+      );
     } catch (error) {
       console.error("Error selecting products:", error);
     }
-  }
+  };
 
-  // ✅ Form Submit Function
-  const handleSubmit = async (e: FormEvent<HTMLFormElement>): Promise<void> => {
+  // ✅ Handle Add / Update
+  const handleSubmit = async (e: FormEvent<HTMLFormElement>) => {
     e.preventDefault();
 
-    if (selectedProducts.length === 0) {
-      (window as any).shopify.toast.show("Please select at least one product.", { duration: 2000 });
-      return;
-    }
-
     if (!note.trim()) {
-      (window as any).shopify.toast.show("Please add a note before saving.", { duration: 2000 });
+      (window as any).shopify.toast.show("Please add a note.", { duration: 2000 });
       return;
     }
 
-    // 👇 Send both product IDs and note together
-    const payload = { products: selectedProducts.map(p => p.id), note: note.trim() };
-    console.log(payload, "this is payload");
+    const payload = editingNote
+      ? { actionType: "update", noteId: editingNote.id, note }
+      : { actionType: "add", products: selectedProducts.map((p) => p.id), note };
 
-     // 👇 JSON আকারে ডেটা পাঠাও
-    submit(JSON.stringify(payload), {
+    await fetch(window.location.pathname, {
       method: "POST",
-      encType: "application/json",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
     });
+
+    (window as any).shopify.toast.show(
+      editingNote ? "✅ Note updated!" : "✅ Note added!",
+      { duration: 2500 }
+    );
+
+    setSelectedProducts([]);
+    setNote("");
+    setEditingNote(null);
+    window.location.reload();
+  };
+
+  // ✅ Handle Delete
+  const handleDelete = async (id: string) => {
+    if (!confirm("Are you sure you want to delete this note?")) return;
+    await fetch(window.location.pathname, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ actionType: "delete", noteId: id }),
+    });
+    (window as any).shopify.toast.show("🗑️ Note deleted!", { duration: 2500 });
+    window.location.reload();
+  };
+
+  // ✅ Handle Edit
+  const handleEdit = (item: any) => {
+    setEditingNote(item);
+    setNote(item.note);
+    setSelectedProducts([
+      { id: item.productId, title: item.title, image: item.image },
+    ]);
   };
 
   return (
     <s-page heading="Additional Page">
+      {editingNote && (
+        <s-button
+          tone="neutral"
+          slot="secondary-actions"
+          onClick={() => {
+            setEditingNote(null);
+            setNote("");
+            setSelectedProducts([]);
+          }}
+        >
+          Cancel
+        </s-button>
+      )}
+
+      {/* ================= Add / Edit Form ================= */}
       <s-section>
         <form data-save-bar onSubmit={handleSubmit}>
-          <s-clickable onClick={selectProduct}>
-            <s-text-field
-              label="Select product"
-              placeholder="Select products"
-              readOnly
-              value={
-                selectedProducts.length > 0
-                  ? selectedProducts.map((p) => p.title).join(", ")
-                  : ""
-              }
-            />
-          </s-clickable>
+          {!editingNote && (
+            <div style={{ marginBlock: "1rem" }}>
+              <s-text-field
+                onClick={selectProduct}
+                label="Select product"
+                placeholder="Select products"
+                readOnly
+                value={
+                  selectedProducts.length > 0
+                    ? selectedProducts.map((p) => p.title).join(", ")
+                    : ""
+                }
+              />
+            </div>
+          )}
 
-          <s-clickable paddingBlock="base">
+          <div style={{ marginBlock: "1rem" }}>
             <s-text-area
-              label="Note"
-              placeholder="Add a note about these products..."
+              label={editingNote ? "Update Note" : "Add Note"}
+              placeholder="Write something about this product..."
               value={note}
               onInput={(e: any) => setNote(e.target.value)}
               rows={4}
             />
-          </s-clickable>
+          </div>
         </form>
       </s-section>
-      <s-section>
-        display product list using for datebase.
+
+      {/* ================= Display Table ================= */}
+      {data && data.length > 0 &&  (
+      <s-section heading="Saved Product Notes">
+        
+          <s-table>
+            <s-table-header-row>
+              <s-table-header>Image</s-table-header>
+              <s-table-header>Title</s-table-header>
+              <s-table-header>Note</s-table-header>
+              <s-table-header>Created</s-table-header>
+              <s-table-header>Actions</s-table-header>
+            </s-table-header-row>
+
+            <s-table-body>
+              {data.map((item: any) => {
+                const productId = item.productId?.split("/").pop();
+                const shopName = item.shop?.replace(".myshopify.com", "");
+
+                return (
+                  <s-table-row key={item.id}>
+                    <s-table-cell>
+                      {item.image ? (
+                        <img
+                          src={item.image}
+                          alt={item.title}
+                          width="50"
+                          height="50"
+                          style={{ borderRadius: "6px" }}
+                        />
+                      ) : (
+                        "No Image"
+                      )}
+                    </s-table-cell>
+
+                    <s-table-cell>
+                      <s-link
+                        href={`https://admin.shopify.com/store/${shopName}/products/${productId}`}
+                        target="_blank"
+                      >
+                        {item.title}
+                      </s-link>
+                    </s-table-cell>
+
+                    <s-table-cell>{item.note}</s-table-cell>
+                    <s-table-cell>
+                      {new Date(item.createdAt).toLocaleDateString()}
+                    </s-table-cell>
+                    <s-table-cell>
+                      <div style={{ display: "flex", gap: "10px" }}>
+                        <s-button icon="edit" onClick={() => handleEdit(item)} />
+                        <s-button
+                          icon="delete"
+                          tone="critical"
+                          onClick={() => handleDelete(item.id)}
+                        />
+                      </div>
+                    </s-table-cell>
+                  </s-table-row>
+                );
+              })}
+            </s-table-body>
+          </s-table>
       </s-section>
+      )}
     </s-page>
   );
 }
